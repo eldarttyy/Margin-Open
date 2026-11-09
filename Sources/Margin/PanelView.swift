@@ -102,7 +102,10 @@ struct PanelView: View {
             Text(statusText.0).font(.caption).foregroundStyle(.secondary)
         }
 
-
+        if model.blenderLink.needsAttention && !model.isPreview {
+            Label(model.blenderLink.title, systemImage: "puzzlepiece.extension")
+                .font(.caption).foregroundStyle(.secondary)
+        }
         if let update = model.updates.available {
             Button { NSWorkspace.shared.open(update.url) } label: {
                 Label("Version \(update.version) is available", systemImage: "arrow.down.circle").font(.caption)
@@ -121,19 +124,16 @@ struct PanelView: View {
         }
 
         VStack(spacing: 12) {
+            toggleRow("wand.and.stars", "Smart Edges", "Now: \(model.activeProfileName)", $store.config.smartEdges)
             PanelRow(symbol: "hand.tap.fill", title: "Haptic Feedback", detail: "Ticks as you slide", prominent: true) {
                 Picker("", selection: $store.config.haptics) {
                     ForEach(HapticLevel.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
                 .labelsHidden().fixedSize()
             }
-            if model.plan == .pro {
-                toggleRow("speaker.slash.fill", "Quick Mute", "Hold the top-right corner", $store.config.quickMute)
-            }
+            toggleRow("speaker.slash.fill", "Quick Mute", "Hold the top-right corner", $store.config.quickMute)
             toggleRow("forward.fill", "Media Strip", "Top edge, in Finder and music apps", $store.config.mediaStrip)
-            if model.plan == .pro {
-                toggleRow("playpause.fill", "Tap to Play or Pause", "Tap the top-right corner", $store.config.tapToPlay)
-            }
+            toggleRow("playpause.fill", "Tap to Play or Pause", "Tap the top-right corner", $store.config.tapToPlay)
         }
 
         Divider()
@@ -209,6 +209,7 @@ struct PanelView: View {
         toggleRow("arrow.left.arrow.right", "Swap Sides", store.config.swapSides ? "Left: Volume · Right: Brightness" : "Left: Brightness · Right: Volume", $store.config.swapSides, prominent: false)
         toggleRow("rectangle.bottomhalf.filled", "Bottom Quarter Only", "Sides respond in the lower 25% only", $store.config.tuning.lowerQuarterOnly, prominent: false)
         toggleRow("option", "Require Fn or ⌥", "Only slide while holding a modifier", $store.config.requireModifier, prominent: false)
+        toggleRow("capslock", "Caps Lock Layer", model.capsUnavailable ? "Another tool is remapping keys" : "Hold it for a second set of edges", $store.config.capsLayer, prominent: false)
 
         Divider()
         sectionTitle("While Sliding")
@@ -267,6 +268,8 @@ struct PanelView: View {
         Menu {
             Toggle("Enabled", isOn: $store.config.enabled)
             Button("All Apps…") { model.showSettings() }
+            Button(model.edgeGuideTitle) { model.showEdgeGuide() }
+            Button("Learn a Shortcut…") { model.startLearning() }
             Button("Reload Config File") { store.reload() }
             Button("Restart Touch Input") { model.restartInput() }
         } label: {

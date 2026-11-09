@@ -76,12 +76,30 @@ public extension MarginConfig {
             if let binding = base[zone] { result[zone] = ResolvedBinding(binding: binding, layer: .system) }
         }
 
+        let isSystemApp = context.bundleID.map(Layers.systemApps.contains) ?? true
+        if smartEdges, !isSystemApp {
+            apply(Layers.universal, .universal)
+            apply(Layers.category(context.category), .category)
+            if let pack = Packs.pack(forBundleID: context.bundleID) {
+                apply(pack.bindings, .pack)
+                if let mode = context.mode, let bindings = pack.modes[mode] { apply(bindings, .pack) }
+            }
+            if let site = context.site.flatMap(Sites.pack(id:)) { apply(site.bindings, .pack) }
+        }
+
+        if capsLayer, capsHeld { apply(Layers.caps, .universal) }
+
         if let app = profile(forBundleID: context.bundleID) {
             for zone in ZoneID.allCases {
                 if let binding = app[zone] { result[zone] = ResolvedBinding(binding: binding, layer: .user) }
                 if let mode = context.mode, let binding = app[zone, mode: mode] {
                     result[zone] = ResolvedBinding(binding: binding, layer: .user)
                 }
+            }
+        }
+        if let site = context.site, let saved = profile(forBundleID: Sites.profileID(site)) {
+            for zone in ZoneID.allCases {
+                if let binding = saved[zone] { result[zone] = ResolvedBinding(binding: binding, layer: .user) }
             }
         }
         return result

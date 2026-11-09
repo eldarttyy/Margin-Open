@@ -20,8 +20,8 @@ enum Network {
 /// Accessibility grant, so automatic updates wait for a Developer ID.
 @MainActor
 final class UpdateChecker: ObservableObject {
-    /// Set to the site's version.json once it has a domain. Until then nothing is checked.
-    static let feedURL: URL? = nil
+    /// The site's version.json. Change it here if the site moves to its own domain.
+    static let feedURL: URL? = URL(string: "https://margin-theta-five.vercel.app/version.json")
 
     private static let enabledKey = "checkForUpdates"
 

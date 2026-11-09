@@ -390,22 +390,7 @@ private func rest(_ x: Double, _ y: Double, ms: Int = 100) -> [(Double, Double)]
     }
 }
 
-@Suite struct FreePlanTests {
-    @Test func freeKeepsVolumeAndSkipAndNothingElse() {
-        let limited = MarginConfig.standard.limited(to: .free)
-        #expect(limited.base[.rightEdge]?.slider == .volume)
-        #expect(limited.base[.rightEdge]?.mode == .slider)
-        #expect(limited.base[.topEdge]?.forward.kind == .nextTrack)
-        #expect(limited.base[.leftEdge]?.mode == .off)
-        #expect(limited.base[.topLeft]?.mode == .off)
-        #expect(limited.base[.topRight]?.mode == .off)
-    }
-
-    @Test func freeFeaturesAreExactlyVolumeSkipAndOff() {
-        let free = FeatureCatalog.system.filter(\.isFree).map(\.title).sorted()
-        #expect(free == ["Next track", "Off", "Output volume", "Previous track", "Skip tracks"])
-    }
-
+@Suite struct FeatureSearchTests {
     @Test func searchMatchesTitlesAndKeywords() {
         #expect(FeatureCatalog.search("sound", in: FeatureCatalog.system).first?.title == "Output volume")
         #expect(FeatureCatalog.search("zzzz", in: FeatureCatalog.system).isEmpty)

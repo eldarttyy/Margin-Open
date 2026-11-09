@@ -29,11 +29,13 @@ final class ActionRunner {
     private var midiValues: [Int: Double] = [:]
     private var lastPluginValue: [ZoneID: Double] = [:]
     private var pendingTap: DispatchWorkItem?
+    private let semantics = SemanticRunner()
 
     private static let detents = 16.0
     private static let shellInterval = 1.0 / 15
 
     func setFrontmost(pid: pid_t) {
+        queue.async { [self] in semantics.setFrontmost(pid: pid) }
     }
 
     /// Whatever follows a slide on this queue runs after that slide's travel has
@@ -67,10 +69,19 @@ final class ActionRunner {
             switch event {
             case .captured:
                 haptics.actuations.map { Haptics.play($0.detent) }
+                if binding.mode == .semantic, binding.semantic == .valueUnderPointer,
+                   let location = CGEvent(source: nil)?.location {
+                    semantics.beginPointer(at: location)
+                }
             case .slide:
                 break
             case .step(_, let forward):
                 haptics.actuations.map { Haptics.play($0.detent) }
+                if binding.mode == .semantic {
+                    semantics.step(binding.semantic, forward: forward)
+                    if hud { show(forward ? "chevron.up" : "chevron.down", binding.label) }
+                    return
+                }
                 run(forward ? binding.forward : binding.backward, hud: hud)
             case .tap:
                 haptics.actuations.map { Haptics.play($0.confirm) }
@@ -104,6 +115,7 @@ final class ActionRunner {
         lastDetent[zone] = nil
         scrollRemainder[zone] = nil
         lastPluginValue[zone] = nil
+        semantics.endPointer()
         // A command still running sends its last value when it exits.
         if !shellRunning.contains(zone), let command = shellPending[zone] {
             startShell(zone, command)
@@ -115,12 +127,34 @@ final class ActionRunner {
     private func slide(_ zone: ZoneID, _ binding: ZoneBinding, delta: Double, haptics: HapticLevel, hud: Bool) {
         let travel = delta * binding.sensitivity * (binding.invert ? -1 : 1)
 
+        if binding.mode == .semantic {
+            switch binding.semantic {
+            case .scroll:
+                scroll(zone, travel: travel)
+            case .valueUnderPointer:
+                if let result = semantics.slidePointer(travel: travel) {
+                    if hud { HUD.post(symbol: "slider.horizontal.3", title: result.name, value: result.fraction) }
+                } else if hud {
+                    show("cursorarrow.rays", "No slider under the pointer")
+                }
+            default:
+                break
+            }
+            return
+        }
 
         switch binding.slider {
         case .scroll:
             scroll(zone, travel: travel)
-        case .plugin, .midi:
-            break
+        case .plugin:
+            slidePlugin(zone, binding, travel: travel, haptics: haptics, hud: hud)
+        case .midi:
+            let next = clamp((midiValues[binding.cc] ?? 0.5) + travel)
+            midiValues[binding.cc] = next
+            MIDIOut.shared.send(cc: binding.cc, value: next)
+            if hud {
+                HUD.post(symbol: "pianokeys", title: binding.label, value: next, detail: String(Int((next * 127).rounded())))
+            }
         case .shell:
             let next = clamp((shellValues[zone] ?? 0.5) + travel)
             shellValues[zone] = next
@@ -156,6 +190,36 @@ final class ActionRunner {
     }
 
     /// The plugin's report is the truth for range and readout. Within a slide
+    /// Margin tracks its own value, because reports lag the finger.
+    private func slidePlugin(_ zone: ZoneID, _ binding: ZoneBinding, travel: Double, haptics: HapticLevel, hud: Bool) {
+        let bridge = PluginBridge.shared
+        guard let parameter = bridge.parameter(binding.parameter) else {
+            if hud {
+                show("puzzlepiece.extension.fill", bridge.isConnected ? "\(binding.label) isn't available here" : "Margin add-on isn't connected")
+            }
+            return
+        }
+        if parameter.relative {
+            bridge.send(binding.parameter, travel)
+            if hud { show("rotate.3d", binding.label) }
+            return
+        }
+
+        let current = values[zone] ?? parameter.value
+        let next = min(parameter.max, max(parameter.min, current + travel * (parameter.max - parameter.min)))
+        values[zone] = next
+        let shown = parameter.integer ? next.rounded() : next
+        guard shown != lastPluginValue[zone] else { return }
+        let previous = lastPluginValue[zone] ?? parameter.value
+        lastPluginValue[zone] = shown
+        bridge.send(binding.parameter, shown)
+        if Detents.crossed(from: previous, to: shown, detents: parameter.detents), let tick = haptics.actuations?.confirm {
+            Haptics.play(tick)
+        }
+        if hud {
+            HUD.post(symbol: "puzzlepiece.extension.fill", title: binding.label, value: parameter.fraction(shown), detail: parameter.format(shown))
+        }
+    }
 
     private func finishSlide(_ zone: ZoneID, _ target: SliderTarget, _ value: Double, haptics: HapticLevel, hud: Bool) {
         let detent = Int((value * Self.detents).rounded())
@@ -233,15 +297,37 @@ final class ActionRunner {
                 if hud { show("exclamationmark.triangle.fill", "Bad shortcut: \(action.value)") }
                 return
             }
-            Input.post(combo)
+            if combo.typesText, semantics.isEditingText {
+                if hud { show("keyboard", "You're typing, so that was skipped") }
+                return
+            }
+            Input.post(combo, to: semantics.targetPid)
+        case .menuItem:
+            if !semantics.pressMenu(action.value), hud {
+                show("exclamationmark.triangle.fill", "No menu item: \(action.value)")
+            }
         case .shell:
             shell(action.value, value: nil)
         case .shortcut:
             if action.isSafeArgument { launch("/usr/bin/shortcuts", ["run", action.value]) }
         case .openApp:
             if action.isSafeArgument { launch("/usr/bin/open", ["-a", action.value]) }
-        case .menuItem, .plugin:
-            break
+        case .plugin:
+            guard PluginBridge.shared.isConnected else {
+                if hud { show("puzzlepiece.extension.fill", "Margin add-on isn't connected") }
+                return
+            }
+            PluginBridge.shared.send(action.value, 1)
+        case .screenControl:
+            guard let target = ScreenTarget(action.value) else { return }
+            let outcome = ScreenReader.shared.perform(target)
+            guard hud, outcome != .done else { return }
+            switch outcome {
+            case .appNotRunning: show("exclamationmark.triangle.fill", "That app isn't open")
+            case .disabled: show("nosign", "\(ScreenControl(kind: target.kind, label: target.label).title) is unavailable")
+            case .noAccess: show("lock.fill", "Margin needs Accessibility")
+            default: show("questionmark.circle.fill", "Can't see \(ScreenControl(kind: target.kind, label: target.label).title)")
+            }
         case .openURL:
             if let url = action.openableURL { NSWorkspace.shared.open(url) }
         }

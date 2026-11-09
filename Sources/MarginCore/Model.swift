@@ -57,6 +57,7 @@ public enum SliderTarget: String, Codable, CaseIterable, Sendable {
 public enum ActionKind: String, Codable, CaseIterable, Sendable {
     case none, playPause, nextTrack, previousTrack, toggleMute, toggleMic
     case keyCombo, menuItem, shell, shortcut, openApp, openURL, plugin
+    case screenControl
 
     public var title: String {
         switch self {
@@ -73,6 +74,7 @@ public enum ActionKind: String, Codable, CaseIterable, Sendable {
         case .openApp: return "Open app"
         case .openURL: return "Open URL"
         case .plugin: return "App plugin command"
+        case .screenControl: return "On-screen control"
         }
     }
 
@@ -85,6 +87,7 @@ public enum ActionKind: String, Codable, CaseIterable, Sendable {
         case .openApp: return "Raycast"
         case .openURL: return "https://example.com"
         case .plugin: return "xray_toggle"
+        case .screenControl: return "press|com.spotify.client|button|Add to Liked Songs"
         default: return nil
         }
     }
@@ -397,6 +400,8 @@ public struct MarginConfig: Codable, Equatable, Sendable {
     public var smartEdges = true
     /// Holding Caps Lock switches every edge to a second layer.
     public var capsLayer = false
+    /// Shows what the edges do the first time each app comes to the front.
+    public var explainNewApps = true
     public var appearance = AppearanceMode.system
     public var tuning = Tuning()
     public var base: Profile
@@ -418,6 +423,7 @@ public struct MarginConfig: Codable, Equatable, Sendable {
         songInMenuBar = try c.decodeIfPresent(Bool.self, forKey: .songInMenuBar) ?? true
         smartEdges = try c.decodeIfPresent(Bool.self, forKey: .smartEdges) ?? true
         capsLayer = try c.decodeIfPresent(Bool.self, forKey: .capsLayer) ?? false
+        explainNewApps = try c.decodeIfPresent(Bool.self, forKey: .explainNewApps) ?? true
         appearance = c.lenient(AppearanceMode.self, forKey: .appearance) ?? .system
         tuning = try c.decodeIfPresent(Tuning.self, forKey: .tuning) ?? Tuning()
         base = try c.decode(Profile.self, forKey: .base)

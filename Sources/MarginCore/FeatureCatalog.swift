@@ -26,13 +26,6 @@ public struct Feature: Identifiable, Equatable, Sendable {
         self.usesBridge = usesBridge
     }
 
-    public var isFree: Bool {
-        switch payload {
-        case .binding(let binding): return binding.isFree
-        case .action(let action): return action.isFree
-        }
-    }
-
     /// Slides or presses that would hurt if touched by accident. These never
     /// get recommended, and show a warning when they're found by searching.
     public var isRisky: Bool {
@@ -110,7 +103,21 @@ public enum FeatureCatalog {
     }
 
     /// What's specific to one app, before anything that works everywhere.
-    public static func appFeatures(forBundleID bundleID: String?) -> [Feature] { [] }
+    public static func appFeatures(forBundleID bundleID: String?) -> [Feature] {
+        guard let bundleID else { return [] }
+        if let site = Sites.pack(profileID: bundleID) { return site.features }
+        var result: [Feature] = []
+        if Packs.blender.bundleIDs.contains(bundleID) { result += blender }
+        if let entry = AppShortcuts.entry(forBundleID: bundleID) {
+            result += entry.items.map { item in
+                Feature(
+                    id: "app.\(item.title).\(item.combo)", title: item.title, group: "\(entry.name) shortcuts",
+                    keywords: "\(item.keywords) \(item.combo)", payload: .action(Action(.keyCombo, item.combo)))
+            }
+        }
+        if Packs.pack(forBundleID: bundleID)?.name == "Music production" { result += midi }
+        return result
+    }
 
     /// Features for the commands in an app's menu bar, from each item's path.
     public static func menuFeatures(_ paths: [[String]]) -> [Feature] {
@@ -179,7 +186,7 @@ public enum FeatureCatalog {
     /// Whole-edge features that suit an app with none of its own.
     public static func edgePicks(forBundleID bundleID: String?) -> [String] {
         guard let bundleID else { return [] }
-        let players = ["com.spotify.client", "com.apple.Music", "com.apple.TV", "com.apple.podcasts"]
+        let players = ["com.spotify.client", "com.apple.Music"] + Packs.players
         return players.contains(bundleID) ? ["system.volume", "system.skip"] : ["any.scroll", "any.zoom", "any.tabs"]
     }
 

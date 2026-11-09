@@ -36,37 +36,6 @@ final class Selected<Value>: ObservableObject {
     init(_ value: Value) { self.value = value }
 }
 
-/// One set of edges, used everywhere.
-struct SettingsView: View {
-    @ObservedObject var model: AppModel
-    @ObservedObject private var store: ConfigStore
-    @StateObject private var general = Selected(false)
-
-    init(model: AppModel) {
-        self.model = model
-        store = model.store
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Picker("", selection: $general.value) {
-                Text("Edges").tag(false)
-                Text("General").tag(true)
-            }
-            .pickerStyle(.segmented).labelsHidden().fixedSize().padding(.top, 12)
-            if general.value {
-                GeneralPane(model: model)
-            } else {
-                ProfilePane(profile: $store.config.base, isBase: true, config: store.config, model: model, onUpgrade: {}, onDelete: {})
-            }
-        }
-        .onAppear {
-            let live = model.liveTouches
-            model.controller.setTouchObserver { live.post($0) }
-        }
-        .onDisappear { model.controller.setTouchObserver(nil) }
-    }
-}
 
 // MARK: - Trackpad map
 
@@ -169,7 +138,6 @@ struct ProfilePane: View {
     let isBase: Bool
     let config: MarginConfig
     @ObservedObject var model: AppModel
-    let onUpgrade: () -> Void
     let onDelete: () -> Void
 
     @StateObject private var zone = Selected(ZoneID.rightEdge)
@@ -179,6 +147,7 @@ struct ProfilePane: View {
     private var bundleID: String? { profile.bundleIDs.first }
 
     private var context: AppContext {
+        if let site = Sites.pack(profileID: bundleID) { return AppContext(bundleID: "com.google.Chrome", site: site.id) }
         let url = bundleID.flatMap { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }
         let category = url.flatMap { Bundle(url: $0)?.infoDictionary?["LSApplicationCategoryType"] as? String }
         return AppContext(bundleID: bundleID, category: AppCategory(lsCategory: category), mode: mode.value)
@@ -187,19 +156,33 @@ struct ProfilePane: View {
     /// What this zone really does here, across all five layers.
     private func effective(_ zone: ZoneID) -> ResolvedBinding? {
         if isBase { return profile[zone].map { ResolvedBinding(binding: $0, layer: .system) } }
+        return withEdits.resolve(context)[zone]
+    }
+
+    /// The saved config with this pane's unsaved profile in place.
+    private var withEdits: MarginConfig {
         var resolved = config
         if let index = resolved.apps.firstIndex(where: { $0.id == profile.id }) { resolved.apps[index] = profile }
-        return resolved.resolve(context)[zone]
+        else if !isBase { resolved.apps.append(profile) }
+        return resolved
     }
 
     private var modes: [String] {
-        []
+        (Packs.pack(forBundleID: bundleID)?.modes.keys.sorted() ?? []).filter { $0 != "GRAB" }
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
+                if isBlender { blenderStatus }
+                if !modes.isEmpty {
+                    Picker("Edit bindings for", selection: $mode.value) {
+                        Text("Every mode").tag(String?.none)
+                        ForEach(modes, id: \.self) { Text(Packs.modeTitle($0)).tag(String?.some($0)) }
+                    }
+                    .pickerStyle(.segmented)
+                }
                 HStack(alignment: .top, spacing: 22) {
                     VStack(alignment: .leading, spacing: 8) {
                         TrackpadMap(
@@ -214,25 +197,38 @@ struct ProfilePane: View {
 
                     ZoneEditor(
                         zone: zone.value, mode: mode.value, profile: $profile, isBase: isBase,
-                        effective: effective(zone.value), plan: model.plan,
+                        effective: effective(zone.value),
                         accessibility: model.accessibilityGranted,
                         onGrant: { model.requestAccessibility() },
                         onBridgeFeature: {
+                            model.syncBlender()
                         })
                         .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+                if !isBase {
+                    EdgeGuideList(rows: withEdits.guide(for: context), selection: $zone.value)
                 }
             }
             .padding(24)
         }
     }
 
+    private var isBlender: Bool { bundleID.map(Packs.blender.bundleIDs.contains) ?? false }
+
+    private var blenderStatus: some View {
+        let link = model.blenderLink
+        return Label(link.title, systemImage: link == .connected ? "checkmark.circle.fill" : "puzzlepiece.extension")
+            .foregroundStyle(link == .connected ? Color.green : Color.secondary)
+    }
 
     private var subtitle: String {
         if isBase { return "Used in Finder and music apps, and everywhere when Smart Edges is off." }
+        if Sites.pack(profileID: bundleID) != nil { return "Used while this site is in the front tab of your browser." }
         return profile.bundleIDs.joined(separator: ", ")
     }
 
     private var removeTitle: String {
+        if Sites.pack(profileID: bundleID) != nil { return "Reset Site" }
         return "Remove App"
     }
 
@@ -259,15 +255,19 @@ private struct FeatureLibrary: View {
     let bundleID: String?
     let appName: String
     let isBase: Bool
-    let plan: Plan
     let accessibility: Bool
     let onGrant: () -> Void
     let onPick: (Feature, FeatureSlot) -> Void
+    /// For snapshots: a search already typed, and the screen section open.
+    var previewQuery = ""
+    var previewOpen = false
 
     @StateObject private var query = Selected("")
     @StateObject private var notRunning = Selected(false)
     @StateObject private var needsAccess = Selected(false)
     @StateObject private var menus = Selected<[Feature]>([])
+    /// Buttons, toggles, tabs and sliders in the app's windows.
+    @StateObject private var screen = Selected<[Feature]>([])
     @StateObject private var menuNote = Selected<String?>(nil)
     @StateObject private var slot = Selected<FeatureSlot?>(nil)
     @StateObject private var hidden = Selected<Set<String>>([])
@@ -280,7 +280,7 @@ private struct FeatureLibrary: View {
     }
 
     private var results: [Feature] {
-        FeatureCatalog.search(query.value, in: appFeatures + menus.value + FeatureCatalog.system)
+        FeatureCatalog.search(query.value, in: appFeatures + menus.value + screen.value + FeatureCatalog.system)
             .filter { !$0.slots(on: zone).isEmpty && !hidden.value.contains($0.id) }
     }
 
@@ -319,6 +319,7 @@ private struct FeatureLibrary: View {
                         section("More for \(appName)", shelves.more)
                         section("Works in any app", shelves.everywhere, folded: !isBase)
                         section("All \(appName) menu commands", shelves.menus, folded: true)
+                        section("Everything on \(appName)'s screen", screen.value.filter { !$0.slots(on: zone).isEmpty }, folded: !previewOpen)
                     }
                 }
                 .padding(.horizontal, 10)
@@ -333,7 +334,10 @@ private struct FeatureLibrary: View {
                 }
             }
         }
-        .task(id: "\(bundleID ?? "")\(accessibility)") { await loadMenus() }
+        .task(id: "\(bundleID ?? "")\(accessibility)") {
+            if !previewQuery.isEmpty { query.value = previewQuery }
+            await loadMenus()
+        }
         .task { hidden.value = await Task.detached { Hardware.missingFeatures }.value }
     }
 
@@ -351,10 +355,6 @@ private struct FeatureLibrary: View {
         }
     }
 
-    private func isLocked(_ feature: Feature) -> Bool {
-        plan == .free && (!feature.isFree || !isBase)
-    }
-
     private func row(_ feature: Feature) -> some View {
         let whole = feature.slots(on: zone).contains(.whole)
         return HStack(spacing: 6) {
@@ -364,21 +364,61 @@ private struct FeatureLibrary: View {
                     .help("Easy to set off by accident")
             }
             Spacer(minLength: 8)
-            if isLocked(feature) {
-                Image(systemName: "lock.fill").font(.caption).foregroundStyle(.secondary)
-            } else {
-                Text(whole ? "Uses whole edge" : activeSlot.title(on: zone)).font(.caption).foregroundStyle(.secondary)
-                Button("Add") { onPick(feature, whole ? .whole : activeSlot) }.controlSize(.small)
-            }
+            Text(whole ? "Uses whole edge" : activeSlot.title(on: zone)).font(.caption).foregroundStyle(.secondary)
+            Button("Add") { onPick(feature, whole ? .whole : activeSlot) }.controlSize(.small)
         }
         .padding(.vertical, 3)
     }
 
     private func loadMenus() async {
         menus.value = []
+        screen.value = []
         menuNote.value = nil
         notRunning.value = false
         needsAccess.value = false
+        // Blender draws its own menus, so there's nothing to read. Its catalog
+        // covers it, and a website has no menus of its own.
+        guard let bundleID, !Packs.blender.bundleIDs.contains(bundleID), Sites.pack(profileID: bundleID) == nil else { return }
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else {
+            notRunning.value = true
+            menuNote.value = "Open \(appName) to add commands from its menus."
+            return
+        }
+        guard accessibility else {
+            needsAccess.value = true
+            menuNote.value = "Accessibility is off, so \(appName)'s menus can't be listed."
+            return
+        }
+        let pid = app.processIdentifier
+        // Runs beside the menu reading, which can take seconds.
+        Task { await loadScreen(bundleID: bundleID, pid: pid) }
+        // A newly opened app builds its menus a moment after launching.
+        for attempt in 0..<6 {
+            guard !Task.isCancelled else { return }
+            let paths = await Task.detached { SemanticRunner.menuPaths(pid: pid) }.value
+            let found = FeatureCatalog.menuFeatures(paths)
+            if !found.isEmpty {
+                menus.value = found
+                return
+            }
+            if attempt < 5 { try? await Task.sleep(for: .seconds(1)) }
+        }
+        menuNote.value = "\(appName) doesn't share its menus, so add shortcuts under Advanced."
+    }
+
+    /// Reads the app's windows. Electron apps fill theirs in only after being
+    /// asked once, so an empty first look gets a second.
+    private func loadScreen(bundleID: String, pid: pid_t) async {
+        for attempt in 0..<3 {
+            guard !Task.isCancelled else { return }
+            let controls = await Task.detached { ScreenReader.shared.controls(pid: pid, budget: 3).map(\.control) }.value
+            let found = FeatureCatalog.screenFeatures(bundleID: bundleID, controls: controls, isBrowser: Sites.browsers.contains(bundleID))
+            if !found.isEmpty || attempt == 2 {
+                screen.value = found
+                return
+            }
+            try? await Task.sleep(for: .seconds(1))
+        }
     }
 
     private func openApp() {
@@ -399,7 +439,6 @@ private struct ZoneEditor: View {
     @Binding var profile: Profile
     let isBase: Bool
     let effective: ResolvedBinding?
-    let plan: Plan
     let accessibility: Bool
     let onGrant: () -> Void
     let onBridgeFeature: () -> Void
@@ -434,11 +473,12 @@ private struct ZoneEditor: View {
                 }
             }
             FeatureLibrary(
-                zone: zone, bundleID: profile.bundleIDs.first, appName: profile.name, isBase: isBase, plan: plan,
+                zone: zone, bundleID: profile.bundleIDs.first, appName: profile.name, isBase: isBase,
                 accessibility: accessibility, onGrant: onGrant, onPick: add)
             DisclosureGroup("Advanced") {
                 VStack(alignment: .leading, spacing: 12) {
                     if !isBase {
+                        Toggle(mode == nil ? "Customize for this app" : "Customize for \(Packs.modeTitle(mode!))", isOn: overrides)
                     }
                     if let binding {
                         if zone.isCorner { cornerFields(binding) } else { edgeFields(binding) }
@@ -478,6 +518,24 @@ private struct ZoneEditor: View {
                 if binding.wrappedValue.slider == .shell {
                     TextField("Command, with the value in $VALUE", text: binding.command)
                         .font(.system(.body, design: .monospaced))
+                }
+                if binding.wrappedValue.slider == .plugin {
+                    HStack {
+                        TextField("Plugin value, such as brush_size", text: binding.parameter)
+                            .font(.system(.body, design: .monospaced))
+                        let names = PluginBridge.shared.parameterNames
+                        if !names.isEmpty {
+                            Menu("Choose") {
+                                ForEach(names, id: \.self) { name in
+                                    Button(name) {
+                                        binding.wrappedValue.parameter = name
+                                        binding.wrappedValue.name = ""
+                                    }
+                                }
+                            }
+                            .fixedSize()
+                        }
+                    }
                 }
                 if binding.wrappedValue.slider == .midi {
                     Stepper("Controller \(binding.wrappedValue.cc)", value: binding.cc, in: 0...127)
@@ -578,6 +636,12 @@ struct GeneralPane: View {
                     Toggle("Check for updates", isOn: $updates.enabled)
                 }
                 Toggle("Show on-screen readout", isOn: $store.config.hud)
+                LabeledContent {
+                    Button("Show Again for Every App") { Toast.shared.forgetAll() }
+                        .disabled(!store.config.explainNewApps)
+                } label: {
+                    Toggle("Explain the edges when I open an app for the first time", isOn: $store.config.explainNewApps)
+                }
                 Picker("Trackpad haptics", selection: $store.config.haptics) {
                     ForEach(HapticLevel.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
@@ -626,13 +690,13 @@ struct GeneralPane: View {
 /// system state, so layouts can be checked without Screen Recording access.
 @MainActor
 enum Snapshot {
-    private static func write<V: View>(_ view: V, size: NSSize, appearance: NSAppearance.Name, to url: URL) {
+    private static func write<V: View>(_ view: V, size: NSSize, appearance: NSAppearance.Name, to url: URL, wait: TimeInterval = 0.5) {
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = NSAppearance(named: appearance)
         let host = NSHostingView(rootView: view.frame(width: size.width, height: size.height).background(Color(nsColor: .windowBackgroundColor)))
         window.contentView = host
         window.layoutIfNeeded()
-        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.5))
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: wait))
         guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
         host.cacheDisplay(in: host.bounds, to: rep)
         try? rep.representation(using: .png, properties: [:])?.write(to: url)
@@ -654,13 +718,100 @@ enum Snapshot {
             var profile = config.base
             let binding = Binding(get: { profile }, set: { profile = $0 })
             for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
-                write(ProfilePane(profile: binding, isBase: true, config: config, model: model, onUpgrade: {}, onDelete: {}),
+                write(ProfilePane(profile: binding, isBase: true, config: config, model: model, onDelete: {}),
                       size: NSSize(width: 680, height: 520), appearance: appearance, to: base.appendingPathComponent("profile-\(name).png"))
+                var blender = Profile(name: "Blender", bundleIDs: Packs.blender.bundleIDs)
+                let blenderBinding = Binding(get: { blender }, set: { blender = $0 })
+                write(ProfilePane(profile: blenderBinding, isBase: false, config: config, model: model, onDelete: {}),
+                      size: NSSize(width: 760, height: 640), appearance: appearance, to: base.appendingPathComponent("blender-\(name).png"))
+                var safari = Profile(name: "Safari", bundleIDs: ["com.apple.Safari"])
+                let safariBinding = Binding(get: { safari }, set: { safari = $0 })
+                write(ProfilePane(profile: safariBinding, isBase: false, config: config, model: model, onDelete: {}),
+                      size: NSSize(width: 760, height: 640), appearance: appearance, to: base.appendingPathComponent("safari-\(name).png"))
+                var youtube = Profile(name: "YouTube", bundleIDs: [Sites.profileID("youtube")])
+                let youtubeBinding = Binding(get: { youtube }, set: { youtube = $0 })
+                write(ProfilePane(profile: youtubeBinding, isBase: false, config: config, model: model, onDelete: {}),
+                      size: NSSize(width: 760, height: 640), appearance: appearance, to: base.appendingPathComponent("youtube-\(name).png"))
+                // A real app's windows, so this needs it running and Accessibility.
+                if let app = ProcessInfo.processInfo.environment["MARGIN_SNAPSHOT_APP"],
+                   let name = NSRunningApplication.runningApplications(withBundleIdentifier: app).first?.localizedName {
+                    for (file, query, open) in [("screen", "", true), ("screen-search", ProcessInfo.processInfo.environment["MARGIN_SNAPSHOT_QUERY"] ?? "", false)] {
+                        write(FeatureLibrary(zone: .topRight, bundleID: app, appName: name, isBase: false, accessibility: AXIsProcessTrusted(),
+                                             onGrant: {}, onPick: { _, _ in }, previewQuery: query, previewOpen: open),
+                              size: NSSize(width: 460, height: 420), appearance: appearance, to: base.appendingPathComponent("\(file)-\(name)-\(appearance == .aqua ? "light" : "dark").png"), wait: 6)
+                    }
+                }
+                for (file, id, app) in [("toast", "com.microsoft.VSCode", "Visual Studio Code"), ("toast-blender", Packs.blender.bundleIDs[0], "Blender")] {
+                    let fresh = ToastState()
+                    fresh.app = app
+                    fresh.rows = config.guide(for: AppContext(bundleID: id, category: .developer))
+                    write(ToastView(state: fresh, onCustomize: {}, onClose: {}),
+                          size: NSSize(width: 484, height: 290), appearance: appearance, to: base.appendingPathComponent("\(file)-\(name).png"))
+                }
+                let trying = ToastState()
+                trying.app = "Visual Studio Code"
+                trying.rows = config.guide(for: AppContext(bundleID: "com.microsoft.VSCode", category: .developer))
+                trying.tried = [.rightEdge, .topEdge]
+                trying.active = .topEdge
+                write(ToastView(state: trying, onCustomize: {}, onClose: {}),
+                      size: NSSize(width: 484, height: 290), appearance: appearance, to: base.appendingPathComponent("toast-trying-\(name).png"))
+                write(CheatSheetView(app: "Blender · Sculpt", current: .rightEdge, bindings: config.resolve(AppContext(bundleID: Packs.blender.bundleIDs[0], category: .graphics, mode: "SCULPT"))),
+                      size: NSSize(width: 316, height: 270), appearance: appearance, to: base.appendingPathComponent("cheat-\(name).png"))
                 panel.page = .glance
                 write(PanelView(model: model, state: panel), size: NSSize(width: PanelView.size.width, height: PanelView.glanceHeight), appearance: appearance, to: base.appendingPathComponent("panel-glance-\(name).png"))
                 panel.page = .settings
                 write(PanelView(model: model, state: panel), size: PanelView.size, appearance: appearance, to: base.appendingPathComponent("panel-settings-\(name).png"))
             }
+        }
+    }
+}
+
+/// Every zone's job in this app, in words, so nobody has to click each zone to
+/// find out. A row selects its zone in the map above.
+private struct EdgeGuideList: View {
+    let rows: [EdgeGuideRow]
+    @Binding var selection: ZoneID
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("What the edges do here").font(.headline)
+            if rows.isEmpty {
+                Text("Nothing yet. Select a zone above and add a feature.").foregroundStyle(.secondary)
+            }
+            VStack(spacing: 0) {
+                ForEach(Array(rows.enumerated()), id: \.element.zone) { index, row in
+                    if index > 0 { Divider() }
+                    Button { selection = row.zone } label: { line(row) }
+                        .buttonStyle(.plain)
+                }
+            }
+            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    private func line(_ row: EdgeGuideRow) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(row.zone.title).foregroundStyle(.secondary).frame(width: 130, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.what).fontWeight(row.zone == selection ? .semibold : .regular)
+                Text(row.how).font(.callout).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Text(source(row.layer)).font(.caption).foregroundStyle(.secondary)
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(.quaternary, in: Capsule())
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .contentShape(Rectangle())
+    }
+
+    /// Where the job comes from, in the words Settings uses elsewhere.
+    private func source(_ layer: Layer) -> String {
+        switch layer {
+        case .system: return "Everywhere"
+        case .universal, .category: return "Any app"
+        case .pack: return "Ready-made"
+        case .user: return "Yours"
         }
     }
 }

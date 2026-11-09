@@ -108,7 +108,7 @@ final class CursorGuard {
         case .keyDown, .keyUp:
             // Keys are only timed and checked for the Caps Lock layer. Which key
             // was pressed is never kept.
-            let isCaps = false
+            let isCaps = event.getIntegerValueField(.keyboardEventKeycode) == CapsLayer.f18KeyCode
             input = type == .keyDown ? .keyDown(isCaps: isCaps) : .keyUp(isCaps: isCaps)
         default:
             return Unmanaged.passUnretained(event)

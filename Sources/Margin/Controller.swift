@@ -36,6 +36,11 @@ final class Controller {
     /// Called on the main queue.
     var onRested: ((ZoneID, AppContext) -> Void)?
     var onRestEnded: (() -> Void)?
+    /// Called on the main queue the first time a gesture does something, once
+    /// per touch, so the toast can tick off the edges you've tried.
+    var onZoneUsed: ((ZoneID) -> Void)?
+    /// Zones whose current touch has already been reported to `onZoneUsed`.
+    private var usedThisTouch: Set<ZoneID> = []
     /// Called on the main queue when Learn mode claims a touch.
     var onLearnTouch: ((ZoneID) -> Void)?
     var learnWantsTouch: () -> Bool = { false }
@@ -209,6 +214,17 @@ final class Controller {
             if restShown {
                 restShown = false
                 DispatchQueue.main.async { self.onRestEnded?() }
+            }
+        default:
+            break
+        }
+
+        switch event {
+        case .began(let zone), .ended(let zone), .cancelled(let zone):
+            usedThisTouch.remove(zone)
+        case .slide(let zone, _), .step(let zone, _), .tap(let zone), .doubleTap(let zone), .hold(let zone), .deferredTap(let zone):
+            if usedThisTouch.insert(zone).inserted {
+                DispatchQueue.main.async { self.onZoneUsed?(zone) }
             }
         default:
             break
